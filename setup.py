@@ -8,13 +8,13 @@ with open("README.md", "r") as fh:
 
 setup(
     name = "xfntr",
-    version = "0.2.6",
+    version = "0.2.7",
     author = "Zhu Liang",
     author_email = "zliang8@uic.edu",
     description = "A software that analyzes xfntr data",
     long_description = long_description,
     long_description_content_type = "text/markdown",
-    url = "https://github.com/zhul9311/XFNTR.git",
+    url = "https://github.com/zhul9311/XFNTR-win.git",
     packages = find_packages(),
     package_dir = {'':'.'},
     package_data = {
