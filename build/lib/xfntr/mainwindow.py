@@ -236,7 +236,7 @@ class MainWindow (QMainWindow):
                 _fit_range = ':'.join(str(self.flu_fit_range)[1:-1].split(','))
                 self.ui.fluSimuRangeLE.setText(_simu_range)
                 self.ui.fluFitRangeLE.setText(_fit_range)
-                self.ui.fluloffLE.setText(str(self.qz[0]))
+#               self.ui.fluloffLE.setText(str(self.qz[0]))
             except Exception as e:
                 self.updateUI(fresh=True)
 
@@ -707,10 +707,10 @@ class MainWindow (QMainWindow):
                                                             directory=self.directory)
             fname = self.saveFileName[0] + '_fit.txt'
             if self.xaxis == 'Qz':
-                fit_to_save = self.flu[0,:,(1,2,3,4,5)].transpose()
+                fit_to_save = self.flu[0,:,(1,2)].transpose()
             elif self.xaxis == 'Sh':
-                fit_to_save = self.flu[:,0,(0,2,3,4,5)]
-            np.savetxt(fname, fit_to_save, fmt='%.4e\t'*5)
+                fit_to_save = self.flu[:,0,(0,2)]
+            np.savetxt(fname, fit_to_save, fmt='%.4e\t%.4e')
 
             self.flusavefitindex=0
             self.uiflusavefit.close()
@@ -821,6 +821,13 @@ class MainWindow (QMainWindow):
 
         self.uifluerr2.show()
 
+    def fluErrorFitSingleCore(self, q, i, flu_par,flucal_par,data_to_fit):
+        fluerr_result = lm.minimize(fl.flu2min, flu_par,
+                                    args=((self.sh, self.qz), flucal_par),
+                                    kws={'data': data_to_fit[:, 1], 'eps': data_to_fit[:, 2]})
+        q.put([i, fluerr_result.nfree, fluerr_result.redchi])
+
+
 
     def fluErrorFit(self):
         self.uifluerr2.label.setText('Calculating the uncertainty for ' + self.fluerr_pname[0])
@@ -836,14 +843,42 @@ class MainWindow (QMainWindow):
 
         # time the calculation
         start_time = time.time()
-        results = []
+        # self.ErrorFit = myThread(self.fitFlu,errorbar=True,args={})
+
+
+
+        # self.fitFlu(uncertainty_calculation=True)
+        # fluErrorFitSingleCore_i = partial(fluErrorFitSingleCore2,
+        #                                   value_list = self.fluerr_fit_range,
+        #                                   sh = self.sh,
+        #                                   qz = self.qz,
+        #                                   pname = fluerr_pname,
+        #                                   flu_par = fluerr_par,
+        #                                   flucal_par = fluerr_cal_par,
+        #                                   data_to_fit = self.data_to_fit)
+        #
+        #
+        # results = multiCore(fluErrorFitSingleCore_i, range(len(self.fluerr_fit_range)))
+        # for pp in results: print(pp)
+        # print("Uncertainty calculation takes:", time.time() - start_time, "seconds")
+        # for result in results:
+        #     self.fluerr_chisq_list[result[0]] = result[3]
+        # self.fluerr_nfree = results[-1][2]
+        # print(self.fluerr_chisq_list)
+
+
         self.fitFlu(uncertainty_calculation=True)
-        
-        for i, value in enumerate(self.fluerr_fit_range):
-            fluerr_result = lm.minimize(fl.flu2min, fluerr_par,
-                                        args=((self.sh, self.qz), fluerr_cal_par),
-                                        kws={'data': self.data_to_fit[:, 1], 'eps': self.data_to_fit[:, 2]})
-            results.append([i, fluerr_result.nfree, fluerr_result.redchi])
+        processes = []  # create a pool for processes
+        q = multiprocessing.Queue()
+        for i,value in enumerate(self.fluerr_fit_range):
+            fluerr_par[fluerr_pname].value = value # change value of the chosen parameter
+            p = multiprocessing.Process(target=self.fluErrorFitSingleCore,
+                                        args=(q, i, fluerr_par,fluerr_cal_par,self.data_to_fit))
+            processes.append(p)
+            p.start()
+        for process in processes:
+            process.join()
+        results = [q.get(True) for process in processes]
 
         for pp in results: print(pp)
         print("Uncertainty calculation takes:", time.time()-start_time, "seconds")
@@ -851,6 +886,15 @@ class MainWindow (QMainWindow):
             self.fluerr_chisq_list[result[0]] = result[2]
         self.fluerr_nfree = results[-1][1]
         print(self.fluerr_chisq_list)
+
+        # # fit data and calculate chisq at each grid point
+        # for i,para_value in enumerate(self.fluerr_fit_range):
+        #     self.fluerr_parameters[self.fluerr_pname_to_fit].value = para_value
+        #     fluresult=lm.minimize(self.flu2min, self.fluerr_parameters, args=(x,y,yerr))
+        #     self.fluerr_chisq_list[i] = fluresult.redchi
+        #     # update progress
+        #
+        # self.progressDialog.hide()
 
         self.uifluerr2.close()
         self.fluErrorResult()

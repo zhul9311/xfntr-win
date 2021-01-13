@@ -17,6 +17,16 @@ p_igMu = (1/1.717)*1e-7    # absorption coefficient of 20keV beam by glass
 p_thick = 3.5 * 1e7     # thickness of glass tray in A
 PI = np.pi
 
+def calculate_beta_delta(rho,E,mu):
+    '''
+    mu in unit of cm^-1, energy in keV, rho in A^-3.
+    '''
+    k = 2 * np.pi * E / 12.3984
+    delta = 2 * np.pi * r_e * rho / k**2
+    beta = mu/k/2e8
+
+    return (k, beta, delta)
+
 def fresnel(a0,k0,beta,delta):
     '''
     Calculate the fresnell reflectivity and transmissivity for an ideal interface.
@@ -24,7 +34,7 @@ def fresnel(a0,k0,beta,delta):
 
     Input:
     -----
-    a0: incident angle 
+    a0: incident angle
     k0: wavevector
     delta and beta: refraction index n=1-delta+j*beta; 0:top; 1:bottom
 
@@ -41,25 +51,30 @@ def fresnel(a0,k0,beta,delta):
 
     R = abs((a_0-a_t)/(a_0+a_t))**2  #Equation 3.17
     T = abs(2*a_0/(a_0+a_t))**2  #Equation 3.17
-    D = 1 / (2*k0*np.imag(a_t)) #Equation 3.16
+    D = 1 / (2*k0*np.imag(a_t)) #Equation 3.16,half the amplitude decay length.
 
     return R,T,D
 
 def penetrate(beta, delta, alpha, k0):
-    alpha[alpha == np.inf] = 0
+    '''
+    Calculate the penetration depth at a given angle.
+    '''
+    alpha[alpha == np.inf] = 0j
     alpha = alpha.astype(complex)
     beta_top, beta_bot = beta
     delta_top, delta_bot = delta
     alpha_c = np.sqrt(2 * (delta_bot - delta_top))
     trans = 4 * np.abs(alpha / (alpha + np.sqrt(alpha ** 2 - alpha_c ** 2))) ** 2
     penetration_coeff = 2 * k0 * np.imag(np.sqrt(alpha ** 2 - alpha_c ** 2 + beta_bot * 2j))
+    print("Critical angle:{}".format(alpha_c))
+    print("Penetration_depth:{}".format(1/penetration_coeff))
     return 1/penetration_coeff, trans
 
 def update_flu_parameters(p, *args):
     '''
     Update parameter dictionary every time the bulk composisition changes.
-    p: the parameter dictionary to be updated. 
-    args: 
+    p: the parameter dictionary to be updated.
+    args:
         args[0]: fitting prarameters
         arge[1]: system parameters (optional)
         args[2]: element information (optional)
@@ -88,7 +103,7 @@ def update_flu_parameters(p, *args):
         print("Please check your parameter:{}".format(e))
 
     if len(args) == 1:
-        return p 
+        return p
     # if the *args is tuple (flu_par, sys_par, flu_elements), do the following
     try:
         sys_par = args[1]
@@ -115,6 +130,8 @@ def update_flu_parameters(p, *args):
     # unwrap system parameters
     E_inc = float(sys_par['E_inc'])  # energy of incidence, in KeV
     E_emit = float(sys_par['E_emt'])  # energy of  emission, in KeV
+    sys_par['mu_top_inc'] = max(sys_par['mu_top_inc'],0.00001) # avoid divide by zero if mu is zero.
+    sys_par['mu_top_emt'] = max(sys_par['mu_top_emt'],0.00001) # avoid divide by zero if mu is zero.
     mu_top_inc = float(sys_par['mu_top_inc'] / 1e8)  # abs. coef. of top phase for incidence, in 1/A
     mu_top_emit = float(sys_par['mu_top_emt'] / 1e8)  # abs. coef. of top phase for emission, in 1/A
     mu_bot_inc = float(sys_par['mu_bot_inc'] / 1e8)  # abs. coef. of bot phase for incidence, in 1/A
@@ -198,7 +215,7 @@ def update_flu_parameters(p, *args):
     return p
 
 def fluCalFun_core(a0,sh,p):
-    
+
     '''takes in flupara_fit, qz, return fluorescence data.
        Note that 'weights' contains the info of the steps for integration
        a0: the incident angle of X-ray beam, corrected with Qz_offset, in rad.
@@ -235,6 +252,7 @@ def fluCalFun_core(a0,sh,p):
        p['bmsz']: the size of the beam for footprint calculation, in A.
        '''
 
+    z_depth = -50  # the predifined depth of interfacial ions
 
     steps = len(p['wt']) - 1
     fprint = p['bmsz'] / np.sin(a0) # foortprint of the beam on the interface.
@@ -251,6 +269,8 @@ def fluCalFun_core(a0,sh,p):
     block = np.isfinite(surface[:,0]) * np.isinf(surface[:,1])  # rays that are blocked by the tray
     x_s = surface[:, 0][hit]  # x' for rays that hit on the interface
     z_s = surface[:, 1][hit] # z' for rays that hit on the interface
+    if p['curv'] == 1e14:
+        z_s = np.zeros(x_s.shape)
     wt_s = p['wt'][hit]  # weight for rays that hit on the interface
 
     # (x,z) and other surface geometry for points where beam hit at the interface.
@@ -270,21 +290,25 @@ def fluCalFun_core(a0,sh,p):
     z_ref_l = -(x_ref + p['detR'] / 2) * a1  # reflection with left det. boundary: x=-l/2
     z_ref_r = -(x_ref - p['detR'] / 2) * a1  # reflection with right det. boundary: x=l/2
 
+    # define the initial intensity to be just background value
+    flu = np.array([p['bg']] * 6)
     # two regions: region3: [-h/2a0,-l/2] & region 2: [-l/2,l/2]
     x_region = [(x_s <= -p['detR'] / 2), (x_s > -p['detR'] / 2) * (x_s < p['detR'] / 2)]
 
     ################### for redgion 1: region x>= l/2  ########################
+    # Special treatment for x>L/2 region.
+    # This region only contains incident beam in organic phase if any, i.e. the part of beam before it hits
+    # the interface. So the contribution from this part of the beam is calculated with x0 instead of x_s,
+    # which is much easier.
     x0_region1 = x0[surface[:, 0] > p['detR'] / 2]  # choose x0 with x'>l/2
     wt_region1 = p['wt'][surface[:, 0] > p['detR'] / 2]  # choose weight with x'>l/2
     upper_bulk1 = wt_region1 * \
                   absorb(-x0_region1 * p['itMu']) / mu_eff_inc * \
                   (absorb((x0_region1 + p['detR'] / 2) * a0 * mu_eff_inc) -
-                   absorb((x0_region1 - p['detR'] / 2) * a0 * mu_eff_inc))
+                   absorb((x0_region1 - p['detR'] / 2) * a0 * mu_eff_inc)) # Equation 5.6
 
-    # define the initial intensity to be just background value
-    flu = np.array([p['bg']] * 6)
-
-    # if beam miss the surface entirely, do the following:
+    # The following case is that the entire beam misses the interface. In this case only incident beam is
+    # calculated and all the calculation below this segment is skipped.
     if len(x_s) == 0:  # the entire beam miss the interface, only incidence in upper phase.
         # sh_offset_factor = absorb(-mu_top_emit * center[i] * a0)
         usum_inc = stepsize * np.sum(upper_bulk1)
@@ -292,12 +316,19 @@ def fluCalFun_core(a0,sh,p):
         flu[0] = flu[3]  # total intensity only contains oil phase
         return flu
 
+    # If the beam hit the interface, reflectivity, transmissivity and the penetration depth is calculated.
     ref, trans, p_depth = fresnel(a_new,p['k0'],(p['itBt'],p['ibBt']), (p['itDt'],p['ibDt']))
     p_depth_eff = 1 / (p['ebMu'] + a_new/a0 / p_depth)
 
     ################### for region -l/2 < x < l/2  #################
+    # original: uniform bulk distribution down to negative infinity.
     lower_bulk2 = x_region[1] * wt_s * absorb(-x_s * p['itMu'] - z_s / p_depth) * trans * p_depth * \
                   (absorb(z_s / p_depth_eff) - absorb(z_inc_r / p_depth_eff))
+    # consider uniform bulk distribution down to 5nm below interface
+    # lower_bulk2 = x_region[1] * wt_s * absorb(-x_s * p['itMu'] - z_s*a1/a0 / p_depth) * trans * p_depth_eff * \
+    #              (absorb(z_s / p_depth_eff) - absorb(z_depth / p_depth_eff))
+    # consider the interfacial region as z_depth below the interface (z_depth=0 for original model)
+    # interface = x_region[1] * wt_s * trans * absorb(-p['itMu'] * x_s) * absorb(-a1/a0*z_depth/p_depth) 
     interface = x_region[1] * wt_s * trans * absorb(-p['itMu'] * x_s)
     upper_bulk2_inc = x_region[1] * wt_s * \
                       (absorb(-x_inc * p['itMu']) / mu_eff_inc * (
@@ -317,7 +348,7 @@ def fluCalFun_core(a0,sh,p):
     if np.sum(block) > 0:
         edge = None
     # combine the two regions and integrate along x direction by performing np.sum.
-    bsum = stepsize * np.sum(lower_bulk3 + lower_bulk2)
+    bsum = stepsize * np.sum(lower_bulk2+lower_bulk3)
     ssum = stepsize * np.sum(interface)
     usum_inc = stepsize * (np.sum(upper_bulk1) + np.sum(upper_bulk2_inc))
     usum_ref = stepsize * (np.sum(upper_bulk3) + np.sum(upper_bulk2_ref))
@@ -363,11 +394,35 @@ def flu2min(pars, x, p, data=None, eps=None): # residuel for flu fitting
 
     return (flu[:,:,2].flatten() - data) / eps
 
+def uncertainty_cal(par, name, value, sh, q, data, p):
+    par[name].value = value
+    par[name].vary = False
+    uncer_result = lm.minimize(flu.flu2min,par,
+                               args=((sh,q),p),
+                               kws={'data':data[:,1],'eps':data[:,2]}
+                   )
+    return uncer_result.redchi
+
 
 if __name__ == '__main__':
-    p_depth, trans = penetrate((1.35e-10, 5.0e-10), (4.466e-7, 5.84e-7), np.array([3.14]), 10.1355)
-    print(p_depth)
-    print(trans)
+    # p_depth, trans = penetrate((1.35e-10, 5.0e-10), (4.466e-7, 5.84e-7), np.array([3.14]), 10.1355)
+    # print(p_depth)
+    # print(trans)
     R,T,D = fresnel(np.array([3.14e-4]),10.1355,(1.35e-10,5.0e-10),(4.466e-7, 5.84e-7))
+    R,T,D = fresnel(np.array([3.e-3]),3.055,(0,8.315e-9),(0,6.318e-6))
     print((R,T,D))
-
+    R,T,D = fresnel(np.array([3.e-3]),3.349,(0,7.585e-9),(0,5.258e-6))
+    print((R,T,D))
+    d = np.loadtxt("/Users/zhuzi/Downloads/attenuation length for water.txt")
+    d = d[(d[:,0]>=6028)*(d[:,0]<=6608)]
+    E = d[:,0] / 1e3
+    mu = d[:,1]
+    rho = 0.333
+    a0 = np.array([3e-3])
+    k, beta, delta = calculate_beta_delta(rho,E,mu)
+    beta = np.stack((np.zeros(len(d)),beta),axis=0)
+    delta = np.stack((np.zeros(len(d)),delta),axis=0)
+    a_c = np.sqrt(2*(delta[1]-delta[0]))
+    R, T, D = fresnel(a0, k, beta, delta)
+    plt.plot(E,a_c*1e3)
+    plt.show()
